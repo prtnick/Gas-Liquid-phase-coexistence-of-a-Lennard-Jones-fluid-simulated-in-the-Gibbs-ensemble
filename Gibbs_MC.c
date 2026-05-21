@@ -12,12 +12,12 @@
 #define NDIM 3
 #define N 513
 
-const int    mc_steps        = 100;
-const int    output_steps    = 10;
+const int    mc_steps        = 1000000;
+const int    output_steps    = 100;
 const double overall_density = 0.2;
-const double delta           = 0.1; //displacements
-const double delta_V         = 0.05; //volume changes
-const double r_cut           = 0.5; //2.5;
+const double delta           = 1.0; //displacements
+const double delta_V         = 0.1; //volume changes
+const double r_cut           = 0.65; //2.5;
 const double Temperature     = 2.0;
 const double beta            = 1.0 / Temperature;
 
@@ -504,7 +504,6 @@ int particle_transfer(void){
 
 int main(int argc, char* argv[]){
     assert(delta > 0.0);
-    printf("hoi!!!!!!!!!!!!!!!1\n");
     e_cut = 4.0 * (pow(1.0 / r_cut, 12.0) - pow(1.0 / r_cut, 6.0)); //did you not make this a simulation variable on purpose?
 
     read_data();
@@ -535,29 +534,31 @@ int main(int argc, char* argv[]){
     
 
     //ratios
-    double ratio_displacement= 10;
-    double ratio_volumechange = 100;
-    double ratio_transfer = 1; 
+    double ratio_displacement= 100;
+    double ratio_volumechange = 1;
+    double ratio_transfer = 1000; 
     double total_ratio = ratio_displacement + ratio_transfer + ratio_volumechange;
-
+    double displacment_divide = ratio_displacement; 
+    double changevolume_divide = ratio_displacement + ratio_volumechange; 
+    double transfer_divide = total_ratio;
+ 
     int accepted = 0; //maybe keep track seperately of each move
     for(int step=0; step < mc_steps; step++){
-        double m = dsfmt_genrand() * total_ratio; //which move
+        
+        //select a random step
+        double  mc_move_extraction = dsfmt_genrand()*total_ratio;
+        if(mc_move_extraction<0){perror("invalid value of mc_move_extraction \n");}
 
-        // if(m <= ratio_transfer) {
-        //     accepted += particle_transfer();
-        // }
-        // if(m > ratio_displacement && m < ratio_volumechange){
-        //     accepted += displacement();
-        // }
-        // if(m >= ratio_volumechange){
-        //     accepted += change_volume(); //Is it correct this one randomly chooses a box to shrink inside the function?
-        // }
-
-        accepted += particle_transfer();
+        if(mc_move_extraction < displacment_divide){
+            accepted+=displacement(); 
+        }   else if(mc_move_extraction < changevolume_divide){
+                accepted=+change_volume();
+            }   else if(mc_move_extraction <= transfer_divide){
+                    accepted+=particle_transfer(); 
+                } else perror("there is some mistake in the implementation of the mc step, dsfmt_genrand can't generate numbers greater than 1 \n");
 
         if(step % output_steps == 0){
-            printf("Step %d. Move acceptance: %lf.\n", step, (double)accepted);
+           printf("Step %d. Move acceptance: %lf.\n", step, (double)accepted/output_steps);
             printf("n_gas = %d \t n_liq = %d \n", gas.n, liq.n);
             accepted = 0;
             //write_data(step);
