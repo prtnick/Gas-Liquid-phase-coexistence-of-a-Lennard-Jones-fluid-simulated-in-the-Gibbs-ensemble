@@ -12,18 +12,24 @@
 #define NDIM 3
 #define N 513
 
-const int    mc_steps        = 200000;
+const int    mc_steps        = 1000000;
 const int    output_steps    = 10000;
+const int    mu_measure_steps = 2000;
 const double overall_density = 0.2;
-const double delta           = 1.0;
-const double delta_V         = 0.01;
+const double delta           = 0.1;
+const double delta_V         = 0.005;
 const double r_cut           = 2.5; 
-const double Temperature     = 2.0;
+const double Temperature     = 0.5;
 const double beta            = 1.0 / Temperature;
+
+const double ratio_displacement= 100;
+const double ratio_volumechange = 1;
+const double ratio_transfer = 2000;
 
 typedef struct {
     int n;
     double energy; 
+    double virial; 
     double r[N][NDIM];
     double box[NDIM];
     const char* input_file;
@@ -37,6 +43,7 @@ typedef struct {
    double V_i; double V_f; 
    double boxn;
    double E_i; double E_f; 
+   double Virial_i; double Virial_f; 
    double scale_factor; 
    double r[N][NDIM];
 } Volume_Move; 
@@ -44,6 +51,13 @@ typedef struct {
 Volume_Move Volume_Move_g; 
 Volume_Move Volume_Move_l; 
 
+typedef struct {
+    double energy; 
+    double virial; 
+} Energy_Virial;
+
+Energy_Virial particle_Energy_Virial_at_position(const Box* b, const double pos[NDIM], int skip_index);
+Energy_Virial particle_Energy_Virial(const Box* b, int i);
 
 double E_tot=0 ;
 double n_tot=0; 
@@ -192,12 +206,15 @@ double distance_squared_pbc(const Box* b, const double a[NDIM], const double c[N
     return r2;
 }
 
-double particle_energy_at_position(const Box* b, const double pos[NDIM], int skip_index) 
+Energy_Virial particle_Energy_Virial_at_position(const Box* b, const double pos[NDIM], int skip_index) 
 {   // pos is just a point, we need this for particle_transfer,  
     // because there will be a new proposed position that is of course not a position of a particle in either of the 2 boxes
     // in that case it will be the skip_index value to be useless and it can be set to b->n   
     // of course I'll want the new particle to interact with all the other particles in the box
-    double en = 0.0;                             
+    Energy_Virial info; 
+    info.energy=0.0; 
+    info.virial=0.0; 
+
     double r_cut2 = r_cut * r_cut;                                                   
     for(int j = 0; j < b->n; ++j){                
         if(j == skip_index){
@@ -211,27 +228,68 @@ double particle_energy_at_position(const Box* b, const double pos[NDIM], int ski
             double inv_r6  = inv_r2 * inv_r2 * inv_r2;
             double inv_r12 = inv_r6 * inv_r6;
 
-            en += 4.0 * (inv_r12 - inv_r6) - e_cut;
+            info.energy += 4.0 * (inv_r12 - inv_r6) - e_cut;
+            info.virial += 24.0 * inv_r6 * (2.0 * inv_r6 - 1.0);
         }
     }
 
-    return en;
+    return info;
 }
 
-double particle_energy(const Box* b, int i)
+Energy_Virial particle_Energy_Virial(const Box* b, int i)
 {
-     return particle_energy_at_position(b, b->r[i], i);
+     return particle_Energy_Virial_at_position(b, b->r[i], i);
 }
 
-double box_energy(const Box* b)
+Energy_Virial box_Energy_Virial(const Box* b)
 {
-    double en = 0.0;
+    Energy_Virial info;
+    info.energy = 0.0;
+    info.virial = 0.0;
 
     for(int i = 0; i < b->n; ++i){
-        en += particle_energy(b, i);
+        Energy_Virial particle_info = particle_Energy_Virial(b, i);
+
+        info.energy += particle_info.energy;
+        info.virial += particle_info.virial;
     }
 
-    return 0.5 * en;
+    info.energy *= 0.5;
+    info.virial *= 0.5;
+
+    return info;
+}
+
+double pressure_measurement(const Box* b)
+{
+    double volume = box_volume(b);
+    double density = (double)b->n / volume;
+
+    return density / beta + b->virial / (3.0 * volume);
+}
+
+double mu_measurement(const Box* b)
+{
+    int ntest = 10000;
+    double sum_boltz = 0.0;
+
+    for(int i = 0; i < ntest; ++i){
+        double r_test[NDIM];
+
+        for(int d = 0; d < NDIM; ++d){
+            r_test[d] = b->box[d] * dsfmt_genrand();
+        }
+
+        Energy_Virial info = particle_Energy_Virial_at_position(b, r_test, -1);
+        sum_boltz += exp(-beta * info.energy);
+    }
+
+    double volume = box_volume(b); 
+    double density = (double)b->n / volume; 
+
+    //chemical potential is given by mu_id + mu_excess (mu_id= kTln(rho) by less than an unimportant constant given by the thermal wavelenght)
+
+    return (1.0 / beta) *( log(density) - log(sum_boltz / ntest) );
 }
 
 void check_box(const Box* b)
@@ -270,7 +328,7 @@ int displacement(void)
     for(int d=0; d<NDIM; d++){
         old_pos[d]=b->r[n][d]; 
     }
-    double Old_particle_Energy=particle_energy(b,n);
+    Energy_Virial Old_particle_Energy_Virial=particle_Energy_Virial(b,n);
     //make a trial move 
     for(int d=0; d<NDIM; d++){
         double shift=(dsfmt_genrand() - 0.5) * 2.0 * delta;
@@ -280,12 +338,14 @@ int displacement(void)
         if(b->r[n][d]>=b->box[d]){b->r[n][d]-= b->box[d];}
     }
     // test energy 
-    double Trial_particle_Energy=particle_energy(b,n); 
+    Energy_Virial Trial_particle_Energy_Virial=particle_Energy_Virial(b,n); 
     //Monte Carlo move 
-    double dE = Trial_particle_Energy - Old_particle_Energy;
+    double dE = Trial_particle_Energy_Virial.energy - Old_particle_Energy_Virial.energy;
+    double dVirial = Trial_particle_Energy_Virial.virial - Old_particle_Energy_Virial.virial;
     if(dE < 0.0 || dsfmt_genrand() < exp(-beta * dE)){
         //move accepted (also update energy of the box)
         b->energy += dE; 
+        b->virial += dVirial;
         E_tot+=dE; //important because energy isn't conserved 
         return 1;
     }
@@ -313,12 +373,17 @@ void proposed_volume_move(Volume_Move*m, const Box*b){   // the const notation i
             m->r[n][d]=trial.r[n][d]; 
         } //these modified positions will be instead be put in the Volume_Move struct, they are conceptually different, this data is saved, and will update the true boxes if the move is accepted
     }
-   m->E_f=0; 
+    
+    // intialise energy and virial 
+   m->E_f=0.0; 
+   m->Virial_f=0.0; 
+
    for(int n=0; n<trial.n; n++){
-   m->E_f+= particle_energy_at_position(&trial,trial.r[n],n); 
+    Energy_Virial Trial_Energy_Virial= particle_Energy_Virial_at_position(&trial,trial.r[n],n);
+   m->E_f += Trial_Energy_Virial.energy;
+   m->Virial_f += Trial_Energy_Virial.virial; 
    }
-   m->E_f *=0.5; // don't count couple twice 
-   trial.energy=m->E_f; //just for the sake of clarity 
+   m->E_f *=0.5; m->Virial_f *=0.5; // don't count couple twice 
 }
 
 int change_volume(void)
@@ -352,6 +417,8 @@ int change_volume(void)
     if(log_acc>=0 || log(u)<log_acc){
         gas.energy=Volume_Move_g.E_f;
         liq.energy=Volume_Move_l.E_f;
+        gas.virial=Volume_Move_g.Virial_f; 
+        liq.virial=Volume_Move_l.Virial_f; 
         E_tot=gas.energy+liq.energy; 
         for(int d=0; d<NDIM; d++){
             gas.box[d]=Volume_Move_g.boxn; 
@@ -371,6 +438,7 @@ int change_volume(void)
     } else return 0;
     
 }
+
 //3. Particle Transfer
 
 int particle_transfer(void)
@@ -391,8 +459,12 @@ int particle_transfer(void)
             }
     // choose a random particle in the source box 
     int n=(int)((source->n)*dsfmt_genrand());
-    // calculate its energy (since the new energy is e (old - energy of particle n) then DeltaE_source=-energy of particle n)
-    double DeltaE_source=-particle_energy(source,n);
+    // calculate its energy and Virial 
+
+    Energy_Virial Source_Energy_Virial=particle_Energy_Virial(source,n); 
+    double DeltaE_source = -Source_Energy_Virial.energy; 
+    double DeltaVirial_source = -Source_Energy_Virial.virial; 
+
     // identify a new target position where to send the particle 
     double r_target[NDIM]; 
     for(int d=0;d<NDIM;d++){
@@ -400,7 +472,11 @@ int particle_transfer(void)
     }
     // identify what energy would be associated with the new particle
     // again E_final= energy old + energy of the target particle, so the delta is just the target particle energy
-    double DeltaE_target = particle_energy_at_position(target,r_target,-1);
+    
+    Energy_Virial Target_Energy_Virial=particle_Energy_Virial_at_position(target,r_target,-1);
+    double DeltaE_target = Target_Energy_Virial.energy;
+    double DeltaVirial_target = Target_Energy_Virial.virial;
+
     double V_source=1;
     for(int d=0; d<NDIM; d++){V_source*=source->box[d];}
     double V_target=1;
@@ -419,6 +495,7 @@ int particle_transfer(void)
             }
         }
         source->energy+=DeltaE_source;
+        source->virial+=DeltaVirial_source; 
 
         //modify target box
         for(int d=0; d<NDIM; d++){
@@ -427,6 +504,7 @@ int particle_transfer(void)
         target->n += 1;   if(target->n >=N){perror("\n target box overflow \n");}
         target->energy+=DeltaE_target;
         E_tot= source->energy + target->energy;
+        target->virial+=DeltaVirial_target; 
         return 1;
     }
     else return 0; 
@@ -449,8 +527,17 @@ int main(int argc, char* argv[]){
     dsfmt_seed(seed);
     printf("box volume: gas = %lf, liq= %lf \n", box_volume(&gas), box_volume(&liq));
     dV = delta_V * (box_volume(&gas) + box_volume(&liq)); 
-    gas.energy = box_energy(&gas); 
-    liq.energy = box_energy(&liq);
+
+    // intialise energy and virial of the 2 boxes 
+    Energy_Virial init; 
+    init = box_Energy_Virial(&gas); 
+    gas.energy = init.energy; 
+    gas.virial = init.virial; 
+    init = box_Energy_Virial(&liq); 
+    liq.energy = init.energy; 
+    liq.virial = init.virial; 
+
+
     E_tot=gas.energy+liq.energy;
     V_tot=box_volume(&gas)+box_volume(&liq);
 
@@ -465,20 +552,30 @@ int main(int argc, char* argv[]){
         fprintf(stderr, "Error: could not write measurements.dat\n");
         exit(EXIT_FAILURE);
     }
+
+    FILE* fp_mu = fopen("mu_measurements.dat", "w");
+    if(fp_mu == NULL){
+        fprintf(stderr, "Error: could not write mu_measurements.dat\n");
+        exit(EXIT_FAILURE);
+    }
     
 
-    //ratios
-    double ratio_displacement= 100;
-    double ratio_volumechange = 1;
-    double ratio_transfer = 1000; 
+    // set how likely each move is to be selected 
+ 
     double total_ratio = ratio_displacement + ratio_transfer + ratio_volumechange;
     double displacment_divide = ratio_displacement; 
     double changevolume_divide = ratio_displacement + ratio_volumechange; 
     double transfer_divide = total_ratio;
 
-    fprintf(fp1, "t \t E_tot \t\t n_gas \t n_liq \t V_gas \t\t V_liq \n"); 
+    fprintf(fp1, "t \t E_tot \t\t n_gas \t n_liq \t V_gas \t\t V_liq \t P_gas \t P_liq \n"); 
+    fprintf(fp_mu, "t \t mu_gas \t mu_liq \n");
  
-    int accepted = 0; //maybe keep track seperately of each move
+    int accepted_displacement = 0;  int tot_disp = 0;
+    int accepted_volume = 0;        int tot_vol_ch = 0; 
+    int accepted_transfer = 0;      int tot_transf = 0;
+    int vol_print_count=0; 
+    const int vol_print_count_threshold = 5;
+
     for(int step=0; step < mc_steps; step++){
         
         //select a random step
@@ -486,25 +583,39 @@ int main(int argc, char* argv[]){
         if(mc_move_extraction<0){perror("invalid value of mc_move_extraction \n");}
 
         if(mc_move_extraction < displacment_divide){
-            accepted+=displacement(); 
+            tot_disp++;
+            accepted_displacement+= displacement(); 
         }   else if(mc_move_extraction < changevolume_divide){
-            int out_ch_v=change_volume();  // printf("volume move attempted.  Performed (yes 1/ no 0) = %d \n", out_ch_v);
-            accepted=out_ch_v;
+            tot_vol_ch++;
+            accepted_volume +=  change_volume(); 
             }   else if(mc_move_extraction <= transfer_divide){
-                    accepted+=particle_transfer(); 
+                tot_transf++;
+                    accepted_transfer += particle_transfer(); 
                 } else perror("there is some mistake in the implementation of the mc step, dsfmt_genrand can't generate numbers greater than 1 \n");
         
 
-        fprintf(fp1, "%d \t %lf \t %d \t %d \t %lf \t %lf \n", step, E_tot, gas.n, liq.n, gas.box[0]*gas.box[1]*gas.box[2], liq.box[0]*liq.box[1]*liq.box[2]); 
+        fprintf(fp1, "%d \t %lf \t %d \t %d \t %lf \t %lf \t %lf \t %lf \n", step, E_tot, gas.n, liq.n, gas.box[0]*gas.box[1]*gas.box[2], liq.box[0]*liq.box[1]*liq.box[2], pressure_measurement(&gas), pressure_measurement(&liq)); 
+
+       if(step % mu_measure_steps == 0){
+            fprintf(fp_mu, "%d \t %lf \t %lf \n", step, mu_measurement(&gas), mu_measurement(&liq));
+        }  
 
         if(step % output_steps == 0){
-            printf("Step %d. Move acceptance: %lf.\n", step, (double)accepted/output_steps);
-            printf("n_gas = %d \t n_liq = %d \n", gas.n, liq.n);
-            accepted = 0;
-            //write_data(step);
+            vol_print_count++; 
+            if(step > 0){
+                printf("Step %d. Move acceptance: displacement acceptance = %lf. \t transfer acceptance = %lf. \t", step, (double)accepted_displacement/tot_disp, (double)accepted_transfer/tot_transf);
+                accepted_displacement=accepted_transfer=tot_disp=tot_transf=0; 
+            }
+            if(vol_print_count == vol_print_count_threshold){
+                printf(" change volume acceptance = %lf. \n",(double)accepted_volume/tot_vol_ch );
+                vol_print_count=0; accepted_volume=tot_vol_ch=0; 
+            } 
+            printf("n_gas = %d \t n_liq = %d \n \n", gas.n, liq.n);
+            write_data(step);
         }
     }
     write_data(mc_steps);
     fclose(fp1);
+    fclose(fp_mu);
     return 0;
 }
