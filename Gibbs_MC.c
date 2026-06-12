@@ -13,11 +13,11 @@
 #define NDIM 3
 #define N 513
 
-const int    mc_steps        = 10000000;
+const int    mc_steps        = 20000000;
 const int    output_steps    = 10000;
 const int    measures_steps  = 1000;
-const int    mu_measure_steps = 4000;
-const double overall_density = 0.2;
+const int    mu_measure_steps = 100000;
+const double overall_density = 0.12;
 const double delta           = 0.1;
 const double delta_V         = 0.005;
 const double r_cut           = 2.5; 
@@ -278,7 +278,11 @@ double pressure_measurement(const Box* b)
 
 double mu_measurement(const Box* b)
 {
-    int ntest = 50000;
+    if(b->n <= 0){
+    return NAN;
+    }
+
+    int ntest = 200000;
     double sum_boltz = 0.0;
     double volume = box_volume(b); 
 
@@ -330,6 +334,14 @@ int displacement(void)
                 fprintf(stderr, "Error: invalid random number in displacement function: u = %f\n", u);
                 return -1;
             }
+// you cannot displace anything if there are no particles (and sometimes it happens)
+
+    if(b->n <= 0){
+            printf(" the Box %s had 0 particles in the displacement function", b->label);
+            return 0;
+        }
+            
+
 // choose the particle to be displaced 
     int n=(int)((b->n)*dsfmt_genrand());
     // save the old position
