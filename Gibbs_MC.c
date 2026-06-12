@@ -3,6 +3,7 @@
 #include <time.h>
 #include <assert.h>
 #include <math.h>
+#include <string.h>
 #include "mt19937.h"
 
 #ifndef M_PI
@@ -12,14 +13,15 @@
 #define NDIM 3
 #define N 513
 
-const int    mc_steps        = 1000000;
+const int    mc_steps        = 10000000;
 const int    output_steps    = 10000;
-const int    mu_measure_steps = 2000;
+const int    measures_steps  = 1000;
+const int    mu_measure_steps = 4000;
 const double overall_density = 0.2;
 const double delta           = 0.1;
 const double delta_V         = 0.005;
 const double r_cut           = 2.5; 
-const double Temperature     = 0.5;
+const double Temperature     = 0.70;
 const double beta            = 1.0 / Temperature;
 
 const double ratio_displacement= 100;
@@ -64,6 +66,12 @@ double n_tot=0;
 double V_tot;
 double e_cut;
 double dV = 0.0; // value will be assigned in the main
+
+char selected_target_box[4]= "xxx";
+int attempts_to_liq = 0;
+int attempts_to_gas = 0;
+int accepted_to_liq = 0;
+int accepted_to_gas = 0;
 
 /*FUNCTIONS*/
 
@@ -270,8 +278,9 @@ double pressure_measurement(const Box* b)
 
 double mu_measurement(const Box* b)
 {
-    int ntest = 10000;
+    int ntest = 50000;
     double sum_boltz = 0.0;
+    double volume = box_volume(b); 
 
     for(int i = 0; i < ntest; ++i){
         double r_test[NDIM];
@@ -281,15 +290,15 @@ double mu_measurement(const Box* b)
         }
 
         Energy_Virial info = particle_Energy_Virial_at_position(b, r_test, -1);
-        sum_boltz += exp(-beta * info.energy);
+        sum_boltz += (volume*exp(-beta * info.energy))/(b->n + 1);
     }
 
-    double volume = box_volume(b); 
-    double density = (double)b->n / volume; 
+    
+    
 
     //chemical potential is given by mu_id + mu_excess (mu_id= kTln(rho) by less than an unimportant constant given by the thermal wavelenght)
 
-    return (1.0 / beta) *( log(density) - log(sum_boltz / ntest) );
+    return (1.0 / beta) *( - log(sum_boltz / ntest) );
 }
 
 void check_box(const Box* b)
@@ -329,6 +338,7 @@ int displacement(void)
         old_pos[d]=b->r[n][d]; 
     }
     Energy_Virial Old_particle_Energy_Virial=particle_Energy_Virial(b,n);
+
     //make a trial move 
     for(int d=0; d<NDIM; d++){
         double shift=(dsfmt_genrand() - 0.5) * 2.0 * delta;
@@ -337,6 +347,7 @@ int displacement(void)
         if(b->r[n][d]<0){b->r[n][d]+= b->box[d];}
         if(b->r[n][d]>=b->box[d]){b->r[n][d]-= b->box[d];}
     }
+    
     // test energy 
     Energy_Virial Trial_particle_Energy_Virial=particle_Energy_Virial(b,n); 
     //Monte Carlo move 
@@ -450,13 +461,27 @@ int particle_transfer(void)
     if(u < 0.5){
         source = &gas;
         target = &liq;
+        strcpy(selected_target_box, "liq");
     } else if(u < 1.0){
             source = &liq;
             target = &gas;
+            strcpy(selected_target_box, "gas");
         } else {
                 fprintf(stderr, "Error: invalid random number in displacement function: u = %f\n", u);
+                strcpy(selected_target_box, "xxx");
                 return -1;
             }
+
+    // check on the validity of n_gas and n_liq 
+    if(source->n <= 0){
+        perror("\n ATTENTION : one box has 0 particles \n");
+        return 0;
+    }
+    if(target->n >= N){
+        perror("\n ATTENTION : risking overflow of the target box ");
+        return 0; 
+    }        
+
     // choose a random particle in the source box 
     int n=(int)((source->n)*dsfmt_genrand());
     // calculate its energy and Virial 
@@ -498,6 +523,10 @@ int particle_transfer(void)
         source->virial+=DeltaVirial_source; 
 
         //modify target box
+        if(target->n >= N){
+        fprintf(stderr, "Error: target box overflow\n");
+        exit(EXIT_FAILURE);
+}
         for(int d=0; d<NDIM; d++){
             target->r[target->n][d]=r_target[d]; // the particle is added on the n+1 th index for simplicity
         }
@@ -558,7 +587,6 @@ int main(int argc, char* argv[]){
         fprintf(stderr, "Error: could not write mu_measurements.dat\n");
         exit(EXIT_FAILURE);
     }
-    
 
     // set how likely each move is to be selected 
  
@@ -590,11 +618,17 @@ int main(int argc, char* argv[]){
             accepted_volume +=  change_volume(); 
             }   else if(mc_move_extraction <= transfer_divide){
                 tot_transf++;
-                    accepted_transfer += particle_transfer(); 
+
+                int transfer_output= particle_transfer();
+                    if(strcmp(selected_target_box, "gas") == 0){
+                    attempts_to_gas ++;  accepted_to_gas += transfer_output;
+                    } else  if(strcmp(selected_target_box, "liq") == 0){attempts_to_liq ++; accepted_to_liq+= transfer_output; }
+                    accepted_transfer += transfer_output; 
+
                 } else perror("there is some mistake in the implementation of the mc step, dsfmt_genrand can't generate numbers greater than 1 \n");
         
 
-        fprintf(fp1, "%d \t %lf \t %d \t %d \t %lf \t %lf \t %lf \t %lf \n", step, E_tot, gas.n, liq.n, gas.box[0]*gas.box[1]*gas.box[2], liq.box[0]*liq.box[1]*liq.box[2], pressure_measurement(&gas), pressure_measurement(&liq)); 
+        if( step % measures_steps == 0) fprintf(fp1, "%d \t %lf \t %d \t %d \t %lf \t %lf \t %lf \t %lf \n", step, E_tot, gas.n, liq.n, gas.box[0]*gas.box[1]*gas.box[2], liq.box[0]*liq.box[1]*liq.box[2], pressure_measurement(&gas), pressure_measurement(&liq)); 
 
        if(step % mu_measure_steps == 0){
             fprintf(fp_mu, "%d \t %lf \t %lf \n", step, mu_measurement(&gas), mu_measurement(&liq));
@@ -611,9 +645,12 @@ int main(int argc, char* argv[]){
                 vol_print_count=0; accepted_volume=tot_vol_ch=0; 
             } 
             printf("n_gas = %d \t n_liq = %d \n \n", gas.n, liq.n);
-            write_data(step);
+           // write_data(step);
         }
     }
+
+    printf("\n attempts to gas = %d, attempts to liq = %d,  effective transfer to gas  = %d, effective transfer to liq = %d \n", attempts_to_gas, attempts_to_liq, accepted_to_gas, accepted_to_liq);
+    printf(" ratio_gas = %lf , ratio_liq = %lf \n", (double)accepted_to_gas/attempts_to_gas , (double)accepted_to_liq/attempts_to_liq ); 
     write_data(mc_steps);
     fclose(fp1);
     fclose(fp_mu);
