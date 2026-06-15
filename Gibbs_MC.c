@@ -18,15 +18,15 @@ const int    output_steps    = 10000;
 const int    measures_steps  = 1000;
 const int    mu_measure_steps = 100000;
 const double overall_density = 0.12;
-const double delta           = 0.1;
-const double delta_V         = 0.005;
+const double delta           = 0.4;
+const double delta_V         = 0.01;
 const double r_cut           = 2.5; 
-const double Temperature     = 0.70;
+const double Temperature     = 1.00;   // roadmap for Temperature: 0.70, 0.80, 0.90, 1.00, 1.10
 const double beta            = 1.0 / Temperature;
 
 const double ratio_displacement= 100;
-const double ratio_volumechange = 1;
-const double ratio_transfer = 2000;
+const double ratio_volumechange = 25;
+const double ratio_transfer = 1500;
 
 typedef struct {
     int n;
@@ -276,15 +276,15 @@ double pressure_measurement(const Box* b)
     return density / beta + b->virial / (3.0 * volume);
 }
 
-double mu_measurement(const Box* b)
+double widom_weight_measurement(const Box* b)
 {
     if(b->n <= 0){
-    return NAN;
+        return NAN;
     }
 
     int ntest = 200000;
     double sum_boltz = 0.0;
-    double volume = box_volume(b); 
+    double volume = box_volume(b);
 
     for(int i = 0; i < ntest; ++i){
         double r_test[NDIM];
@@ -294,16 +294,20 @@ double mu_measurement(const Box* b)
         }
 
         Energy_Virial info = particle_Energy_Virial_at_position(b, r_test, -1);
-        sum_boltz += (volume*exp(-beta * info.energy))/(b->n + 1);
+
+        double boltz = exp(-beta * info.energy);
+
+        if(isfinite(boltz)){
+            sum_boltz += boltz;
+        }
     }
 
-    
-    
+    double avg_boltz = sum_boltz / ntest;
+    double W = (volume / (b->n + 1)) * avg_boltz;
 
-    //chemical potential is given by mu_id + mu_excess (mu_id= kTln(rho) by less than an unimportant constant given by the thermal wavelenght)
-
-    return (1.0 / beta) *( - log(sum_boltz / ntest) );
+    return W;
 }
+
 
 void check_box(const Box* b)
 {
@@ -587,6 +591,7 @@ int main(int argc, char* argv[]){
     printf("Starting total volume:  %f\n", V_tot);
     printf("Starting total energy:  %lf\n", E_tot);
     printf("Starting seed:          %lu\n", seed);
+    printf("Temperature of the Simulation: %lf\n", Temperature);
 
     FILE* fp1 = fopen("measurements.dat", "w");
     if(fp1 == NULL){
@@ -594,8 +599,8 @@ int main(int argc, char* argv[]){
         exit(EXIT_FAILURE);
     }
 
-    FILE* fp_mu = fopen("mu_measurements.dat", "w");
-    if(fp_mu == NULL){
+    FILE* fp2 = fopen("mu_measurements.dat", "w");
+    if(fp2 == NULL){
         fprintf(stderr, "Error: could not write mu_measurements.dat\n");
         exit(EXIT_FAILURE);
     }
@@ -607,8 +612,8 @@ int main(int argc, char* argv[]){
     double changevolume_divide = ratio_displacement + ratio_volumechange; 
     double transfer_divide = total_ratio;
 
-    fprintf(fp1, "t \t E_tot \t\t n_gas \t n_liq \t V_gas \t\t V_liq \t P_gas \t P_liq \n"); 
-    fprintf(fp_mu, "t \t mu_gas \t mu_liq \n");
+    fprintf(fp1, "t \t E_tot \t\t n_gas \t n_liq \t V_gas \t\t V_liq \t\t P_gas \t\t P_liq \n"); 
+    fprintf(fp2, "t \t W_gas \t\t W_liq \n");
  
     int accepted_displacement = 0;  int tot_disp = 0;
     int accepted_volume = 0;        int tot_vol_ch = 0; 
@@ -643,7 +648,7 @@ int main(int argc, char* argv[]){
         if( step % measures_steps == 0) fprintf(fp1, "%d \t %lf \t %d \t %d \t %lf \t %lf \t %lf \t %lf \n", step, E_tot, gas.n, liq.n, gas.box[0]*gas.box[1]*gas.box[2], liq.box[0]*liq.box[1]*liq.box[2], pressure_measurement(&gas), pressure_measurement(&liq)); 
 
        if(step % mu_measure_steps == 0){
-            fprintf(fp_mu, "%d \t %lf \t %lf \n", step, mu_measurement(&gas), mu_measurement(&liq));
+            fprintf(fp2, "%d \t %lf \t %lf \n", step, widom_weight_measurement(&gas), widom_weight_measurement(&liq));
         }  
 
         if(step % output_steps == 0){
@@ -665,6 +670,6 @@ int main(int argc, char* argv[]){
     printf(" ratio_gas = %lf , ratio_liq = %lf \n", (double)accepted_to_gas/attempts_to_gas , (double)accepted_to_liq/attempts_to_liq ); 
     write_data(mc_steps);
     fclose(fp1);
-    fclose(fp_mu);
+    fclose(fp2);
     return 0;
 }
